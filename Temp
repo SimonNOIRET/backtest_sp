@@ -1,0 +1,290 @@
+import pandas as pd import numpy as np import plotly.graph_objects as go import plotly.express as px import streamlit as st
+
+=== PARAMÈTRES === 
+
+duree_annees = 7 jours_par_an = 365 apply_fees = True use_estr = True management_fee_rate = 0.015
+
+=== STRUCTURE DES PRODUITS === 
+
+produits = { 'SPCEPAB': {'indice': 'SPCEPAB Index', 'allocation': 0.25, 'coupon': 0.08, 'barriere_coupon': 0.68}, 'SPFRPAB': {'indice': 'SPFRPAB Index', 'allocation': 0.25, 'coupon': 0.08, 'barriere_coupon': 0.70}, 'SPXFP': {'indice': 'SPXFP Index', 'allocation': 0.25, 'coupon': 0.075, 'barriere_coupon': 0.80}, 'FRDEV40': {'indice': 'FRDEV40 Index', 'allocation': 0.15, 'coupon': 0.08, 'barriere_coupon': 0.72}, 'BFRTEC10':{'indice': 'BFRTEC10 Index','allocation': 0.10, 'coupon': 0.065, 'barriere_coupon': 4.5} }
+
+=== CHARGEMENT DES DONNÉES === 
+
+@st.cache_data def load_data(): df = pd.read_excel("data.xlsx", sheet_name="data", parse_dates=['Date']) df.set_index('Date', inplace=True) df.sort_index(inplace=True) df.columns = df.columns.str.strip() df['ESTR'] = df['ESTRON Index'] / 100 return df
+
+df = load_data()
+
+=== SIMULATION VL === 
+
+def simulate_vl(df, produits, start_date, duree_annees): end_date = start_date + pd.DateOffset(years=duree_annees) date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+
+coupon_dates = [] for year in range(1, duree_annees + 1): target = start_date + pd.DateOffset(years=year) if target > df.index[-1]: continue coupon_date = df.index[df.index.get_indexer([target], method='bfill')[0]] coupon_dates.append(coupon_date) VL = 100.0 cash_cap = 0.0 results = [] for i, current_date in enumerate(date_range): if current_date not in df.index: continue total_coupon = 0 if current_date in coupon_dates: for prod in produits.values(): total_coupon += prod['coupon'] * prod['allocation'] * 100 frais = -management_fee_rate * VL / jours_par_an if apply_fees else 0.0 estr_rate = df.loc[current_date - pd.Timedelta(days=1), 'ESTR'] if i > 0 and current_date - pd.Timedelta(days=1) in df.index else 0.0 cash_inter = cash_cap + total_coupon + frais cash_cap = cash_inter * (1 + estr_rate / 360) VL = 100 + cash_cap results.append({ 'Date': current_date, 'VL': VL, 'Coupon': total_coupon }) return pd.DataFrame(results) === BACKTEST HISTORIQUE === 
+
+def run_backtest(df, produits, duree_annees): backtest_results = [] for start_date in df.index: end_date = start_date + pd.DateOffset(years=duree_annees) if end_date > df.index[-1]: continue
+
+valid = True for key, prod in produits.items(): idx_series = df[prod['indice']] start_val = idx_series.loc[start_date] for year in range(1, duree_annees + 1): obs_date = start_date + pd.DateOffset(years=year) if obs_date > idx_series.index[-1]: valid = False break obs_date = idx_series.index[idx_series.index.get_indexer([obs_date], method='bfill')[0]] obs_val = idx_series.loc[obs_date] ratio = obs_val if key == 'BFRTEC10' else obs_val / start_val if (key == 'BFRTEC10' and ratio > prod['barriere_coupon']) or (key != 'BFRTEC10' and ratio < prod['barriere_coupon']): valid = False break if not valid: break if valid: df_vl = simulate_vl(df, produits, start_date, duree_annees) final_value = df_vl['VL'].iloc[-1] tri = (final_value / 100) ** (1 / duree_annees) - 1 backtest_results.append({'Date de lancement': start_date, 'TRI': tri}) return pd.DataFrame(backtest_results) === APP STREAMLIT === 
+
+st.set_page_config(layout="wide") st.title("Backtest Structurés & Simulation VL")
+
+with st.spinner("Calcul des backtests..."): df_backtest = run_backtest(df, produits, duree_annees)
+
+=== GRAPHIQUE TRI === 
+
+fig_tri = px.line(df_backtest, x='Date de lancement', y='TRI', markers=True, title="TRI annualisé - Arkéa Engagement Structurés") fig_tri.update_yaxes(tickformat=".2%") fig_tri.update_layout(height=400)
+
+st.plotly_chart(fig_tri, use_container_width=True)
+
+=== SÉLECTEUR DE DATE === 
+
+st.markdown("### Simulation dynamique de la VL") date_input = st.selectbox("Choisir la date de départ :", df_backtest['Date de lancement'].dt.date.astype(str).tolist(), index=len(df_backtest) - 1) start_date = pd.to_datetime(date_input) df_sim = simulate_vl(df, produits, start_date, duree_annees)
+
+=== GRAPHIQUE VL === 
+
+fig_vl = go.Figure() fig_vl.add_trace(go.Scatter(x=df_sim['Date'], y=df_sim['VL'], mode='lines', name='VL')) fig_vl.add_trace(go.Scatter(x=df_sim['Date'], y=[100]*len(df_sim), mode='lines', name='Base 100', line=dict(dash='dash')))
+
+coupons = df_sim[df_sim['Coupon'] > 0] fig_vl.add_trace(go.Scatter(x=coupons['Date'], y=coupons['VL'], mode='markers+text', text=[f"+{v:.2f}" for v in coupons['Coupon']], textposition="top center", name="Coupons", marker=dict(color='blue', size=8)))
+
+tri_simule = (df_sim['VL'].iloc[-1] / 100) ** (1 / duree_annees) - 1 fig_vl.update_layout(title=f"Évolution VL (lancement {start_date.date()}) - TRI: {tri_simule:.2%}", height=500)
+
+st.plotly_chart(fig_vl, use_container_width=True)
+
+=== STATISTIQUES === 
+
+def summary_stats(data): return pd.DataFrame({ 'Moyenne': [np.mean(data)], 'Médiane': [np.median(data)], 'Min': [np.min(data)], 'Max': [np.max(data)], 'VaR 5%': [np.percentile(data, 5)], 'VaR 95%': [np.percentile(data, 95)] }).T.rename(columns={0: "TRI"})
+
+st.markdown("### Statistiques TRI historique") st.dataframe(summary_stats(df_backtest['TRI']), use_container_width=True)
+
+import pandas as pd import numpy as np import plotly.graph_objects as go import plotly.express as px import streamlit as st
+
+=== PARAMÈTRES ===
+
+duree_annees = 7 jours_par_an = 365 apply_fees = True use_estr = True management_fee_rate = 0.015
+
+=== STRUCTURE DES PRODUITS ===
+
+produits = { 'SPCEPAB': {'indice': 'SPCEPAB Index', 'allocation': 0.25, 'coupon': 0.08, 'barriere_coupon': 0.68}, 'SPFRPAB': {'indice': 'SPFRPAB Index', 'allocation': 0.25, 'coupon': 0.08, 'barriere_coupon': 0.70}, 'SPXFP':   {'indice': 'SPXFP Index',   'allocation': 0.25, 'coupon': 0.075, 'barriere_coupon': 0.80}, 'FRDEV40': {'indice': 'FRDEV40 Index', 'allocation': 0.15, 'coupon': 0.08, 'barriere_coupon': 0.72}, 'BFRTEC10':{'indice': 'BFRTEC10 Index','allocation': 0.10, 'coupon': 0.065, 'barriere_coupon': 4.5} }
+
+=== CHARGEMENT DES DONNÉES ===
+
+@st.cache_data def load_data(): df = pd.read_excel("data.xlsx", sheet_name="data", parse_dates=['Date']) df.set_index('Date', inplace=True) df.sort_index(inplace=True) df.columns = df.columns.str.strip() df['ESTR'] = df['ESTRON Index'] / 100 return df
+
+df = load_data()
+
+=== SIMULATION VL ===
+
+def simulate_vl(df, produits, start_date, duree_annees): end_date = start_date + pd.DateOffset(years=duree_annees) date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+
+coupon_dates = []
+for year in range(1, duree_annees + 1):
+    target = start_date + pd.DateOffset(years=year)
+    if target > df.index[-1]:
+        continue
+    coupon_date = df.index[df.index.get_indexer([target], method='bfill')[0]]
+    coupon_dates.append(coupon_date)
+
+VL = 100.0
+cash_cap = 0.0
+results = []
+
+for i, current_date in enumerate(date_range):
+    if current_date not in df.index:
+        continue
+
+    total_coupon = 0
+    if current_date in coupon_dates:
+        for prod in produits.values():
+            total_coupon += prod['coupon'] * prod['allocation'] * 100
+
+    frais = -management_fee_rate * VL / jours_par_an if apply_fees else 0.0
+    estr_rate = df.loc[current_date - pd.Timedelta(days=1), 'ESTR'] if i > 0 and current_date - pd.Timedelta(days=1) in df.index else 0.0
+    cash_inter = cash_cap + total_coupon + frais
+    cash_cap = cash_inter * (1 + estr_rate / 360)
+    VL = 100 + cash_cap
+
+    results.append({
+        'Date': current_date,
+        'VL': VL,
+        'Coupon': total_coupon
+    })
+
+return pd.DataFrame(results)
+
+=== BACKTEST HISTORIQUE ===
+
+def run_backtest(df, produits, duree_annees): backtest_results = [] for start_date in df.index: end_date = start_date + pd.DateOffset(years=duree_annees) if end_date > df.index[-1]: continue
+
+valid = True
+    for key, prod in produits.items():
+        idx_series = df[prod['indice']]
+        start_val = idx_series.loc[start_date]
+        for year in range(1, duree_annees + 1):
+            obs_date = start_date + pd.DateOffset(years=year)
+            if obs_date > idx_series.index[-1]:
+                valid = False
+                break
+            obs_date = idx_series.index[idx_series.index.get_indexer([obs_date], method='bfill')[0]]
+            obs_val = idx_series.loc[obs_date]
+            ratio = obs_val if key == 'BFRTEC10' else obs_val / start_val
+            if (key == 'BFRTEC10' and ratio > prod['barriere_coupon']) or (key != 'BFRTEC10' and ratio < prod['barriere_coupon']):
+                valid = False
+                break
+        if not valid:
+            break
+
+    if valid:
+        df_vl = simulate_vl(df, produits, start_date, duree_annees)
+        final_value = df_vl['VL'].iloc[-1]
+        tri = (final_value / 100) ** (1 / duree_annees) - 1
+        backtest_results.append({'Date de lancement': start_date, 'TRI': tri})
+
+return pd.DataFrame(backtest_results)
+
+=== APP STREAMLIT ===
+
+st.set_page_config(layout="wide") st.title("Backtest Structurés & Simulation VL")
+
+with st.spinner("Calcul des backtests..."): df_backtest = run_backtest(df, produits, duree_annees)
+
+=== GRAPHIQUE TRI ===
+
+fig_tri = px.line(df_backtest, x='Date de lancement', y='TRI', markers=True, title="TRI annualisé - Arkéa Engagement Structurés") fig_tri.update_yaxes(tickformat=".2%") fig_tri.update_layout(height=400)
+
+st.plotly_chart(fig_tri, use_container_width=True)
+
+=== SÉLECTEUR DE DATE ===
+
+st.markdown("### Simulation dynamique de la VL") date_input = st.selectbox("Choisir la date de départ :", df_backtest['Date de lancement'].dt.date.astype(str).tolist(), index=len(df_backtest) - 1) start_date = pd.to_datetime(date_input) df_sim = simulate_vl(df, produits, start_date, duree_annees)
+
+=== GRAPHIQUE VL ===
+
+fig_vl = go.Figure() fig_vl.add_trace(go.Scatter(x=df_sim['Date'], y=df_sim['VL'], mode='lines', name='VL')) fig_vl.add_trace(go.Scatter(x=df_sim['Date'], y=[100]*len(df_sim), mode='lines', name='Base 100', line=dict(dash='dash')))
+
+coupons = df_sim[df_sim['Coupon'] > 0] fig_vl.add_trace(go.Scatter(x=coupons['Date'], y=coupons['VL'], mode='markers+text', text=[f"+{v:.2f}" for v in coupons['Coupon']], textposition="top center", name="Coupons", marker=dict(color='blue', size=8)))
+
+tri_simule = (df_sim['VL'].iloc[-1] / 100) ** (1 / duree_annees) - 1 fig_vl.update_layout(title=f"Évolution VL (lancement {start_date.date()}) - TRI: {tri_simule:.2%}", height=500)
+
+st.plotly_chart(fig_vl, use_container_width=True)
+
+=== STATISTIQUES ===
+
+def summary_stats(data): return pd.DataFrame({ 'Moyenne': [np.mean(data)], 'Médiane': [np.median(data)], 'Min': [np.min(data)], 'Max': [np.max(data)], 'VaR 5%': [np.percentile(data, 5)], 'VaR 95%': [np.percentile(data, 95)] }).T.rename(columns={0: "TRI"})
+
+st.markdown("### Statistiques TRI historique") st.dataframe(summary_stats(df_backtest['TRI']), use_container_width=True)
+
+import pandas as pd import numpy as np import plotly.graph_objects as go import plotly.express as px import streamlit as st
+
+=== PARAMÈTRES ===
+
+duree_annees = 7 jours_par_an = 365 apply_fees = True use_estr = True management_fee_rate = 0.015
+
+=== STRUCTURE DES PRODUITS ===
+
+produits = { 'SPCEPAB': {'indice': 'SPCEPAB Index', 'allocation': 0.25, 'coupon': 0.08, 'barriere_coupon': 0.68}, 'SPFRPAB': {'indice': 'SPFRPAB Index', 'allocation': 0.25, 'coupon': 0.08, 'barriere_coupon': 0.70}, 'SPXFP':   {'indice': 'SPXFP Index',   'allocation': 0.25, 'coupon': 0.075, 'barriere_coupon': 0.80}, 'FRDEV40': {'indice': 'FRDEV40 Index', 'allocation': 0.15, 'coupon': 0.08, 'barriere_coupon': 0.72}, 'BFRTEC10':{'indice': 'BFRTEC10 Index','allocation': 0.10, 'coupon': 0.065, 'barriere_coupon': 4.5} }
+
+=== CHARGEMENT DES DONNÉES ===
+
+@st.cache_data def load_data(): df = pd.read_excel("data.xlsx", sheet_name="data", parse_dates=['Date']) df.set_index('Date', inplace=True) df.sort_index(inplace=True) df.columns = df.columns.str.strip() df['ESTR'] = df['ESTRON Index'] / 100 return df
+
+df = load_data()
+
+=== SIMULATION VL ===
+
+def simulate_vl(df, produits, start_date, duree_annees): end_date = start_date + pd.DateOffset(years=duree_annees) date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+
+coupon_dates = []
+for year in range(1, duree_annees + 1):
+    target = start_date + pd.DateOffset(years=year)
+    if target > df.index[-1]:
+        continue
+    coupon_date = df.index[df.index.get_indexer([target], method='bfill')[0]]
+    coupon_dates.append(coupon_date)
+
+VL = 100.0
+cash_cap = 0.0
+results = []
+
+for i, current_date in enumerate(date_range):
+    if current_date not in df.index:
+        continue
+
+    total_coupon = 0
+    if current_date in coupon_dates:
+        for prod in produits.values():
+            total_coupon += prod['coupon'] * prod['allocation'] * 100
+
+    frais = -management_fee_rate * VL / jours_par_an if apply_fees else 0.0
+    estr_rate = df.loc[current_date - pd.Timedelta(days=1), 'ESTR'] if i > 0 and current_date - pd.Timedelta(days=1) in df.index else 0.0
+    cash_inter = cash_cap + total_coupon + frais
+    cash_cap = cash_inter * (1 + estr_rate / 360)
+    VL = 100 + cash_cap
+
+    results.append({
+        'Date': current_date,
+        'VL': VL,
+        'Coupon': total_coupon
+    })
+
+return pd.DataFrame(results)
+
+=== BACKTEST HISTORIQUE ===
+
+def run_backtest(df, produits, duree_annees): backtest_results = [] for start_date in df.index: end_date = start_date + pd.DateOffset(years=duree_annees) if end_date > df.index[-1]: continue
+
+valid = True
+    for key, prod in produits.items():
+        idx_series = df[prod['indice']]
+        start_val = idx_series.loc[start_date]
+        for year in range(1, duree_annees + 1):
+            obs_date = start_date + pd.DateOffset(years=year)
+            if obs_date > idx_series.index[-1]:
+                valid = False
+                break
+            obs_date = idx_series.index[idx_series.index.get_indexer([obs_date], method='bfill')[0]]
+            obs_val = idx_series.loc[obs_date]
+            ratio = obs_val if key == 'BFRTEC10' else obs_val / start_val
+            if (key == 'BFRTEC10' and ratio > prod['barriere_coupon']) or (key != 'BFRTEC10' and ratio < prod['barriere_coupon']):
+                valid = False
+                break
+        if not valid:
+            break
+
+    if valid:
+        df_vl = simulate_vl(df, produits, start_date, duree_annees)
+        final_value = df_vl['VL'].iloc[-1]
+        tri = (final_value / 100) ** (1 / duree_annees) - 1
+        backtest_results.append({'Date de lancement': start_date, 'TRI': tri})
+
+return pd.DataFrame(backtest_results)
+
+=== APP STREAMLIT ===
+
+st.set_page_config(layout="wide") st.title("Backtest Structurés & Simulation VL")
+
+with st.spinner("Calcul des backtests..."): df_backtest = run_backtest(df, produits, duree_annees)
+
+=== GRAPHIQUE TRI ===
+
+fig_tri = px.line(df_backtest, x='Date de lancement', y='TRI', markers=True, title="TRI annualisé - Arkéa Engagement Structurés") fig_tri.update_yaxes(tickformat=".2%") fig_tri.update_layout(height=400)
+
+st.plotly_chart(fig_tri, use_container_width=True)
+
+=== SÉLECTEUR DE DATE ===
+
+st.markdown("### Simulation dynamique de la VL") date_input = st.selectbox("Choisir la date de départ :", df_backtest['Date de lancement'].dt.date.astype(str).tolist(), index=len(df_backtest) - 1) start_date = pd.to_datetime(date_input) df_sim = simulate_vl(df, produits, start_date, duree_annees)
+
+=== GRAPHIQUE VL ===
+
+fig_vl = go.Figure() fig_vl.add_trace(go.Scatter(x=df_sim['Date'], y=df_sim['VL'], mode='lines', name='VL')) fig_vl.add_trace(go.Scatter(x=df_sim['Date'], y=[100]*len(df_sim), mode='lines', name='Base 100', line=dict(dash='dash')))
+
+coupons = df_sim[df_sim['Coupon'] > 0] fig_vl.add_trace(go.Scatter(x=coupons['Date'], y=coupons['VL'], mode='markers+text', text=[f"+{v:.2f}" for v in coupons['Coupon']], textposition="top center", name="Coupons", marker=dict(color='blue', size=8)))
+
+tri_simule = (df_sim['VL'].iloc[-1] / 100) ** (1 / duree_annees) - 1 fig_vl.update_layout(title=f"Évolution VL (lancement {start_date.date()}) - TRI: {tri_simule:.2%}", height=500)
+
+st.plotly_chart(fig_vl, use_container_width=True)
+
+=== STATISTIQUES ===
+
+def summary_stats(data): return pd.DataFrame({ 'Moyenne': [np.mean(data)], 'Médiane': [np.median(data)], 'Min': [np.min(data)], 'Max': [np.max(data)], 'VaR 5%': [np.percentile(data, 5)], 'VaR 95%': [np.percentile(data, 95)] }).T.rename(columns={0: "TRI"})
+
+st.markdown("### Statistiques TRI historique") st.dataframe(summary_stats(df_backtest['TRI']), use_container_width=True)
+
